@@ -401,7 +401,9 @@ out vec4 fragColor;
 
 ${biomeColorFn}
 
-// ---- Smooth 3D value noise (continuous across tile borders) ----
+#define TAU 6.28318530718
+
+// ---- 3D value noise (continuous across tile borders) ----
 float hash13(vec3 p3) {
   p3 = fract(p3 * 0.1031);
   p3 += dot(p3, p3.zyx + 31.32);
@@ -429,6 +431,50 @@ float vnoise(vec3 p) {
   );
 }
 
+// FBM noise for natural variation
+float fbm(vec3 p, int octaves) {
+  float value = 0.0;
+  float amplitude = 0.5;
+  for (int i = 0; i < octaves; i++) {
+    value += amplitude * vnoise(p);
+    p *= 2.0;
+    amplitude *= 0.5;
+  }
+  return value;
+}
+
+// ---- Stable rotation-invariant wave direction on sphere ----
+// Returns a tangent direction that varies continuously across the sphere,
+// derived from spherical coordinates (no pole singularity).
+vec3 waveDirection(vec3 pos) {
+  // Spherical coordinates from world position
+  float lon = atan(pos.z, pos.x);          // [-PI, PI]
+  float lat = asin(clamp(pos.y, -1.0, 1.0)); // [-PI/2, PI/2]
+
+  // Primary wave direction: flows along latitude lines (east-west)
+  vec3 east = normalize(cross(pos, vec3(0.0, 1.0, 0.0)));
+  vec3 north = normalize(cross(east, pos));
+  
+  // Blend between east-west and diagonal flow based on latitude
+  // Near poles: more diagonal; equator: more east-west
+  float latWeight = cos(lat);
+  return normalize(east * latWeight + north * (1.0 - latWeight) * 0.3);
+}
+
+// Directional sine wave with noise-modulated frequency for natural variation
+// Returns phase [-1, 1] based on world position (continuous across hexes)
+float dirWave(vec3 pos, vec3 dir, float baseWavelength, float speed, float time) {
+  // Noise-modulated wavelength: varies spatially across the ocean
+  float noiseScale = 0.008;
+  float wavelengthVariation = fbm(pos * noiseScale + vec3(0.0, time * 0.02, 0.0), 3);
+  float wavelength = baseWavelength * mix(0.85, 1.15, wavelengthVariation * 0.5 + 0.5);
+  
+  float k = TAU / wavelength;
+  float omega = speed * uWaveSpeed * time;
+  float phase = k * dot(dir, pos) - omega;
+  return sin(phase);
+}
+
 void main() {
   vec3 N = normalize(vNormal);
   vec3 V = normalize(vViewDir);
@@ -438,35 +484,6 @@ void main() {
   float coastal = vCoastal;
   float nearCoast = vNearCoast;
   float isOcean = step(biome, 0.5); // biome 0 = ocean -> 1.0, >= 2 = land -> 0.0
-
-  // Wave shimmer — purely a normal perturbation, no geometry moves.
-  // Open ocean: gentle, slow swells. Near/bordering land: a bit choppier.
-  float wave = 0.0;
-  if (isOcean > 0.5) {
-    float p = dot(vWorldPos, vec3(0.21, 0.37, 0.62)) * 0.04;
-    float swell = sin(p + uTime * uWaveSpeed * 0.8) * 0.5 + 0.5;
-    float chop = vnoise(vWorldPos * 0.10 + vec3(0.0, uTime * uWaveSpeed * 0.4, 0.0)) * 2.0 - 1.0;
-
-    // Modulate by land proximity: coastal strongest, then nearCoast, then open ocean faintest.
-    float proximity = mix(0.4, 1.0, mix(coastal, nearCoast, coastal));
-    float baseChop = swell * 0.25 + chop * 0.15;
-    wave = baseChop * proximity * uWaveStrength;
-  }
-
-  // Perturb the normal so lighting / specular glint drifts like ripples.
-  if (wave != 0.0) {
-    vec3 waveDir = normalize(cross(N, vec3(0.0, 1.0, 0.0)));
-    if (dot(waveDir, waveDir) < 0.01) waveDir = normalize(cross(N, vec3(1.0, 0.0, 0.0)));
-    vec3 waveTan = cross(waveDir, N);
-    N = normalize(N + waveDir * wave * 0.8 + waveTan * wave * 0.4);
-  }
-
-  // DEBUG: tint coastal hexes green to verify attribute pipeline
-  // (remove once confirmed working)
-  if (coastal > 0.5) {
-    fragColor = vec4(0.0, 1.0, 0.0, 1.0);
-    return;
-  }
 
   vec3 base = biomeColor(biome);
 
@@ -478,6 +495,56 @@ void main() {
   // Thin atmospheric rim at the silhouette.
   float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
   color += vec3(0.18, 0.38, 0.68) * rim * 0.55;
+
+  // Wave crest lines (delicate cyan/white) and trough shading
+  if (isOcean > 0.5) {
+    // Land proximity: gentle modulation, no bright coastal flashing
+    // Range 0.6 (open) -> 0.9 (coastal) — subtle difference
+    float proximity = mix(0.6, 0.9, mix(coastal, nearCoast, coastal));
+    // Cap proximity to prevent any flash
+    proximity = min(proximity, 0.9);
+    
+    // Stable wave direction (no pole cuts) - continuous across globe
+    vec3 waveDir1 = waveDirection(vWorldPos);
+    
+    // Secondary direction: perpendicular, slightly rotated by noise for natural variation
+    vec3 perp = cross(N, normalize(cross(waveDir1, N)));
+    float dirNoise = fbm(vWorldPos * 0.015 + vec3(uTime * 0.01, 0.0, 0.0), 2);
+    float dirAngle = dirNoise * 0.6; // ±0.6 rad rotation
+    vec3 waveDir2 = normalize(waveDir1 * cos(dirAngle) + perp * sin(dirAngle));
+    
+    // Tertiary direction: diagonal, for interference pattern
+    vec3 waveDir3 = normalize(waveDir1 + perp) * 0.7071;
+
+    // Three wave layers with noise-modulated wavelengths
+    float swell   = dirWave(vWorldPos, waveDir1, 42.0, 0.85, uTime) * 0.55;
+    float chop    = dirWave(vWorldPos, waveDir2, 16.0, 1.35, uTime) * 0.3;
+    float crossCh = dirWave(vWorldPos, waveDir3, 24.0, 1.1, uTime) * 0.2;
+    
+    float combined = swell + chop + crossCh;
+    
+    // Phase-based crest detection — thinner, delicate bell curve
+    float phase = abs(combined);
+    float crest = smoothstep(0.6, 0.8, phase) * smoothstep(0.8, 0.6, phase);
+    crest = pow(crest, 1.1) * proximity * uWaveStrength * 0.35;
+    
+    // Trough shading: very subtle darker blue between crests
+    float trough = smoothstep(0.25, 0.6, phase) * (1.0 - crest);
+    trough *= proximity * uWaveStrength * 0.15;
+    
+    // Crest color: cyan/light-blue, not bright white
+    vec3 crestColor = mix(vec3(0.3, 0.7, 0.9), vec3(0.6, 0.9, 1.0), smoothstep(0.0, 1.0, ndl));
+    color += crestColor * crest;
+    color -= vec3(0.04, 0.08, 0.14) * trough;
+    
+    // Subtle sun glint on forward-facing crests
+    float glint = pow(max(dot(N, normalize(L + V)), 0.0), 20.0) * crest * 0.4;
+    color += vec3(0.5, 0.8, 1.0) * glint;
+
+    // Subtle base ocean texture (faint noise) so open ocean never looks empty
+    float baseNoise = vnoise(vWorldPos * 0.04 + vec3(uTime * 0.008, 0.0, 0.0)) * 0.5;
+    color += vec3(0.02, 0.04, 0.06) * baseNoise * proximity * 0.5;
+  }
 
   // Tile borders. Screen-space width, capped so zoomed-out tiles stay clean.
   float aa = max(fwidth(vEdge), 1e-5);
@@ -504,7 +571,7 @@ void main() {
 
   tileMaterial.setVector3('uSunDir', new Vector3(0.8, 0.45, 0.55).normalize());
   tileMaterial.setFloat('uBorderWidth', 0.16);
-  tileMaterial.setFloat('uWaveStrength', 2.5);
+  tileMaterial.setFloat('uWaveStrength', 0.45);
   tileMaterial.setFloat('uWaveSpeed', 1.0);
   tileMaterial.backFaceCulling = false;
   tileMaterial.forceDepthWrite = true;
@@ -589,11 +656,6 @@ void main() {
   function updateUniforms(_cameraPos: Vector3, time: number) {
     // Scene uniforms (camera position) are updated automatically by Babylon.
     tileMaterial.setFloat('uTime', time);
-    tileMaterial.setFloat('uWaveStrength', 2.5);
-    tileMaterial.setFloat('uWaveSpeed', 1.0);
-    if (Math.floor(time * 10) % 10 === 0) {
-      console.log('[Ocean] uTime=', time.toFixed(3), 'uWaveStrength=2.5 uWaveSpeed=1.0');
-    }
   }
 
   return {

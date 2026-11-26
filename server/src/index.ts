@@ -31,6 +31,16 @@ app.get('/stats', (_req, res) => {
   res.json(lobbyManager.getStats());
 });
 
+// Warm endpoint (for keep-alive ping)
+app.get('/warm', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    uptime: process.uptime(),
+    memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB'
+  });
+});
+
 // Parse JSON bodies
 app.use(express.json());
 

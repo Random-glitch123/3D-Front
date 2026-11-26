@@ -1,13 +1,19 @@
-# TODO
+# RUN
+
+use hg for
 
 Client - npm run dev
 
 Server - npm run start
 
+## Done 
 
-player names not actually displaying in host or join ui
+Base-map
+Main menu
+Basic Connection between host and client
 
-if host closes or leaves game, kick all other players to main menu with message saying host left
+
+### TODO
 
 Fix ocean shader
 
