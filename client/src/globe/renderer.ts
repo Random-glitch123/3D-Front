@@ -1,0 +1,605 @@
+// ============================================================================
+// Globe Renderer
+// Loads world-map.json and draws the hex-tiled Earth.
+//
+// * One merged mesh for every tile (ocean + land).
+// * Flat per-tile shading (all vertices of a tile share the tile-centre normal).
+// * Biome colours come from the JSON palette, baked into the shader.
+// * Borders are drawn in the fragment shader from a per-vertex edge attribute,
+//   so they can never z-fight or leave gaps.
+// ============================================================================
+
+import {
+  Scene,
+  Mesh,
+  VertexData,
+  ShaderMaterial,
+  Color4,
+  Vector3,
+  Constants,
+  Engine,
+} from '@babylonjs/core';
+
+export interface WorldMapData {
+  meta: {
+    name: string;
+    subdivisions: number;
+    radius: number;
+    hexCount: number;
+    cornerCount: number;
+    triangleCount: number;
+    biomeColors: Record<string, [number, number, number]>;
+  };
+  corners: number[];
+  cornerHeights: number[];
+  hexes: Array<{
+    id: number;
+    center: [number, number, number];
+    corners: number[];
+    neighbors: number[];
+    biome: number;
+    elevation: number;
+    height: number;
+  }>;
+}
+
+export interface GlobeRenderer {
+  scene: Scene;
+  landMesh: Mesh;
+  dispose(): void;
+  updateUniforms(cameraPos: Vector3, time: number): void;
+}
+
+function buildBiomeColorFunction(
+  palette: Record<string, [number, number, number]>,
+): string {
+  const entries = Object.entries(palette)
+    .map(([id, rgb]) => ({ id: Number(id), rgb }))
+    .sort((a, b) => a.id - b.id);
+
+  let glsl = 'vec3 biomeColor(float biome) {\n';
+  for (const { id, rgb } of entries) {
+    glsl += `  if (biome < ${(id + 0.5).toFixed(1)}) return vec3(${rgb[0].toFixed(4)}, ${rgb[1].toFixed(4)}, ${rgb[2].toFixed(4)});\n`;
+  }
+  glsl += '  return vec3(1.0, 0.0, 1.0);\n}';
+  return glsl;
+}
+
+export async function createGlobeRenderer(
+  radius: number = 100,
+  engine: Engine,
+): Promise<GlobeRenderer> {
+  const response = await fetch('/world-map.json');
+  if (!response.ok) {
+    throw new Error(`Failed to load world-map.json: ${response.status}`);
+  }
+  const worldMap = (await response.json()) as WorldMapData;
+  const { hexes, corners } = worldMap;
+
+  const scene = new Scene(engine);
+  scene.clearColor = new Color4(0.012, 0.016, 0.045, 1);
+  scene.autoClear = true;
+
+  // --------------------------------------------------------------------------
+  // Build the merged tile mesh as PRISMS (top + bottom + side walls)
+  // --------------------------------------------------------------------------
+  // Each hex prism has:
+  // - Top face: 1 center + N corners
+  // - Bottom face: 1 center + N corners
+  // - Side walls: N quads (2 tris each) with outward normals
+  // Total vertices per hex: 6N + 2
+  // Total indices per hex: 3*N (top) + 3*N (bottom) + 6*N (sides) = 12N
+
+  // Precompute land proximity per hex for wave modulation.
+  // coastal  = water hex directly bordering land
+  // nearCoast = water hex within 2 hops of land (includes coastal)
+  const isLand = hexes.map(h => h.biome >= 2);
+  const coastal = new Uint8Array(hexes.length);
+  const nearCoast = new Uint8Array(hexes.length);
+  for (let i = 0; i < hexes.length; i++) {
+    if (isLand[i]) continue;
+    let isC = 0;
+    let isN = 0;
+    for (const nb of hexes[i].neighbors) {
+      if (nb < 0 || nb >= hexes.length) continue;
+      if (isLand[nb]) {
+        isC = 1;
+      } else if (!isN) {
+        for (const nb2 of hexes[nb].neighbors) {
+          if (nb2 >= 0 && nb2 < hexes.length && isLand[nb2]) {
+            isN = 1;
+            break;
+          }
+        }
+      }
+    }
+    coastal[i] = isC;
+    nearCoast[i] = isC || isN ? 1 : 0;
+  }
+
+  let vertexCount = 0;
+  let indexCount = 0;
+  for (let hi = 0; hi < hexes.length; hi++) {
+    const n = hexes[hi].corners.length;
+    vertexCount += 6 * n + 2;
+    indexCount += 12 * n;
+  }
+
+  const positions = new Float32Array(vertexCount * 3);
+  const normals = new Float32Array(vertexCount * 3);
+  const biomeAttr = new Float32Array(vertexCount);
+  const edgeAttr = new Float32Array(vertexCount);
+  const coastalAttr = new Float32Array(vertexCount);
+  const nearCoastAttr = new Float32Array(vertexCount);
+  const indices = new Uint32Array(indexCount);
+
+  let v = 0;
+  let idx = 0;
+
+  const baseRadius = radius - 0.5; // Bottom of prism slightly below globe surface
+
+  for (let hi = 0; hi < hexes.length; hi++) {
+    const hex = hexes[hi];
+    const cFlag = coastal[hi];
+    const nFlag = nearCoast[hi];
+    const [cx, cy, cz] = hex.center;
+    const tileHeight = hex.height;
+    const tileRadius = radius + tileHeight;
+    const count = hex.corners.length;
+
+    // ========== TOP FACE ==========
+    const topCenterIdx = v;
+    positions[v * 3] = cx * tileRadius;
+    positions[v * 3 + 1] = cy * tileRadius;
+    positions[v * 3 + 2] = cz * tileRadius;
+    normals[v * 3] = cx;
+    normals[v * 3 + 1] = cy;
+    normals[v * 3 + 2] = cz;
+    biomeAttr[v] = hex.biome;
+    coastalAttr[v] = cFlag;
+    nearCoastAttr[v] = nFlag;
+    edgeAttr[v] = 1;
+    v++;
+
+    const topCornersStart = v;
+    for (const cornerIndex of hex.corners) {
+      const r = tileRadius;
+      positions[v * 3] = corners[cornerIndex * 3] * r;
+      positions[v * 3 + 1] = corners[cornerIndex * 3 + 1] * r;
+      positions[v * 3 + 2] = corners[cornerIndex * 3 + 2] * r;
+      normals[v * 3] = cx;
+      normals[v * 3 + 1] = cy;
+      normals[v * 3 + 2] = cz;
+      biomeAttr[v] = hex.biome;
+    coastalAttr[v] = cFlag;
+    nearCoastAttr[v] = nFlag;
+      edgeAttr[v] = 0;
+      v++;
+    }
+
+    // Top face triangles (fan from center)
+    for (let k = 0; k < count; k++) {
+      indices[idx++] = topCenterIdx;
+      indices[idx++] = topCornersStart + k;
+      indices[idx++] = topCornersStart + ((k + 1) % count);
+    }
+
+    // ========== BOTTOM FACE ==========
+    const bottomCenterIdx = v;
+    positions[v * 3] = cx * baseRadius;
+    positions[v * 3 + 1] = cy * baseRadius;
+    positions[v * 3 + 2] = cz * baseRadius;
+    normals[v * 3] = -cx;
+    normals[v * 3 + 1] = -cy;
+    normals[v * 3 + 2] = -cz;
+    biomeAttr[v] = hex.biome;
+    coastalAttr[v] = cFlag;
+    nearCoastAttr[v] = nFlag;
+    edgeAttr[v] = 1;
+    v++;
+
+    const bottomCornersStart = v;
+    for (const cornerIndex of hex.corners) {
+      const r = baseRadius;
+      positions[v * 3] = corners[cornerIndex * 3] * r;
+      positions[v * 3 + 1] = corners[cornerIndex * 3 + 1] * r;
+      positions[v * 3 + 2] = corners[cornerIndex * 3 + 2] * r;
+      normals[v * 3] = -cx;
+      normals[v * 3 + 1] = -cy;
+      normals[v * 3 + 2] = -cz;
+      biomeAttr[v] = hex.biome;
+    coastalAttr[v] = cFlag;
+    nearCoastAttr[v] = nFlag;
+      edgeAttr[v] = 0;
+      v++;
+    }
+
+    // Bottom face triangles (fan from center, reversed winding for inward normal)
+    for (let k = 0; k < count; k++) {
+      indices[idx++] = bottomCenterIdx;
+      indices[idx++] = bottomCornersStart + ((k + 1) % count);
+      indices[idx++] = bottomCornersStart + k;
+    }
+
+    // ========== SIDE WALLS ==========
+    // For each edge, create a quad (2 triangles) connecting top to bottom
+    // Outward normal = edge direction × up (radial)
+    for (let k = 0; k < count; k++) {
+      const nextK = (k + 1) % count;
+
+      // Top edge vertices
+      const topA = topCornersStart + k;
+      const topB = topCornersStart + nextK;
+
+      // Bottom edge vertices
+      const bottomA = bottomCornersStart + k;
+      const bottomB = bottomCornersStart + nextK;
+
+      // Compute outward normal for this side wall
+      // Edge vector (topB - topA), radial = center of edge
+      const ax = positions[topA * 3];
+      const ay = positions[topA * 3 + 1];
+      const az = positions[topA * 3 + 2];
+      const bx = positions[topB * 3];
+      const by = positions[topB * 3 + 1];
+      const bz = positions[topB * 3 + 2];
+
+      // Radial at edge midpoint (average of two corners)
+      const mx = (ax + bx) * 0.5;
+      const my = (ay + by) * 0.5;
+      const mz = (az + bz) * 0.5;
+      const mlen = Math.hypot(mx, my, mz);
+      const rx = mx / mlen;
+      const ry = my / mlen;
+      const rz = mz / mlen;
+
+      // Outward normal = radial (points away from globe center)
+      const nx = rx;
+      const ny = ry;
+      const nz = rz;
+
+      // We need separate vertices for side walls with correct normals
+      // Create 4 vertices for the quad (topA, topB, bottomB, bottomA) with side normals
+      const sideStart = v;
+
+      // Vertex 0: topA
+      positions[v * 3] = ax;
+      positions[v * 3 + 1] = ay;
+      positions[v * 3 + 2] = az;
+      normals[v * 3] = nx;
+      normals[v * 3 + 1] = ny;
+      normals[v * 3 + 2] = nz;
+      biomeAttr[v] = hex.biome;
+    coastalAttr[v] = cFlag;
+    nearCoastAttr[v] = nFlag;
+      edgeAttr[v] = 0; // edge = 0 for sides
+      v++;
+
+      // Vertex 1: topB
+      positions[v * 3] = bx;
+      positions[v * 3 + 1] = by;
+      positions[v * 3 + 2] = bz;
+      normals[v * 3] = nx;
+      normals[v * 3 + 1] = ny;
+      normals[v * 3 + 2] = nz;
+      biomeAttr[v] = hex.biome;
+    coastalAttr[v] = cFlag;
+    nearCoastAttr[v] = nFlag;
+      edgeAttr[v] = 0;
+      v++;
+
+      // Vertex 2: bottomB
+      const bbx = positions[bottomB * 3];
+      const bby = positions[bottomB * 3 + 1];
+      const bbz = positions[bottomB * 3 + 2];
+      positions[v * 3] = bbx;
+      positions[v * 3 + 1] = bby;
+      positions[v * 3 + 2] = bbz;
+      normals[v * 3] = nx;
+      normals[v * 3 + 1] = ny;
+      normals[v * 3 + 2] = nz;
+      biomeAttr[v] = hex.biome;
+    coastalAttr[v] = cFlag;
+    nearCoastAttr[v] = nFlag;
+      edgeAttr[v] = 0;
+      v++;
+
+      // Vertex 3: bottomA
+      const bax = positions[bottomA * 3];
+      const bay = positions[bottomA * 3 + 1];
+      const baz = positions[bottomA * 3 + 2];
+      positions[v * 3] = bax;
+      positions[v * 3 + 1] = bay;
+      positions[v * 3 + 2] = baz;
+      normals[v * 3] = nx;
+      normals[v * 3 + 1] = ny;
+      normals[v * 3 + 2] = nz;
+      biomeAttr[v] = hex.biome;
+    coastalAttr[v] = cFlag;
+    nearCoastAttr[v] = nFlag;
+      edgeAttr[v] = 0;
+      v++;
+
+      // Two triangles for the quad (CCW from outside)
+      indices[idx++] = sideStart;
+      indices[idx++] = sideStart + 1;
+      indices[idx++] = sideStart + 2;
+      indices[idx++] = sideStart;
+      indices[idx++] = sideStart + 2;
+      indices[idx++] = sideStart + 3;
+    }
+  }
+
+  const landMesh = new Mesh('landMesh', scene);
+  const vertexData = new VertexData();
+  vertexData.positions = positions;
+  vertexData.normals = normals;
+  vertexData.indices = indices;
+  vertexData.applyToMesh(landMesh, false);
+  landMesh.setVerticesData('biome', biomeAttr, false, 1);
+  landMesh.setVerticesData('edge', edgeAttr, false, 1);
+  landMesh.setVerticesData('coastal', coastalAttr, false, 1);
+  landMesh.setVerticesData('nearCoast', nearCoastAttr, false, 1);
+  landMesh.alwaysSelectAsActiveMesh = true;
+
+  // --------------------------------------------------------------------------
+  // Tile shader
+  // --------------------------------------------------------------------------
+  const biomeColorFn = buildBiomeColorFunction(worldMap.meta.biomeColors);
+
+  const tileVertexShader = `#version 300 es
+precision highp float;
+
+in vec3 position;
+in vec3 normal;
+in float biome;
+in float edge;
+in float coastal;
+in float nearCoast;
+
+uniform mat4 viewProjection;
+uniform vec3 cameraPosition;
+
+out vec3 vWorldPos;
+out vec3 vNormal;
+out vec3 vViewDir;
+out float vBiome;
+out float vEdge;
+out float vCoastal;
+out float vNearCoast;
+
+void main() {
+  vWorldPos = position;
+  vNormal = normalize(normal);
+  vViewDir = normalize(cameraPosition - position);
+  vBiome = biome;
+  vEdge = edge;
+  vCoastal = coastal;
+  vNearCoast = nearCoast;
+  gl_Position = viewProjection * vec4(position, 1.0);
+}
+`;
+
+  const tileFragmentShader = `#version 300 es
+precision highp float;
+
+uniform vec3 uSunDir;
+uniform float uBorderWidth;
+uniform float uTime;
+uniform float uWaveStrength;
+uniform float uWaveSpeed;
+
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec3 vViewDir;
+in float vBiome;
+in float vEdge;
+in float vCoastal;
+in float vNearCoast;
+
+out vec4 fragColor;
+
+${biomeColorFn}
+
+// ---- Smooth 3D value noise (continuous across tile borders) ----
+float hash13(vec3 p3) {
+  p3 = fract(p3 * 0.1031);
+  p3 += dot(p3, p3.zyx + 31.32);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
+float vnoise(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+
+  float n000 = hash13(i + vec3(0.0, 0.0, 0.0));
+  float n100 = hash13(i + vec3(1.0, 0.0, 0.0));
+  float n010 = hash13(i + vec3(0.0, 1.0, 0.0));
+  float n110 = hash13(i + vec3(1.0, 1.0, 0.0));
+  float n001 = hash13(i + vec3(0.0, 0.0, 1.0));
+  float n101 = hash13(i + vec3(1.0, 0.0, 1.0));
+  float n011 = hash13(i + vec3(0.0, 1.0, 1.0));
+  float n111 = hash13(i + vec3(1.0, 1.0, 1.0));
+
+  return mix(
+    mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+    mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+    f.z
+  );
+}
+
+void main() {
+  vec3 N = normalize(vNormal);
+  vec3 V = normalize(vViewDir);
+  vec3 L = normalize(uSunDir);
+
+  float biome = vBiome;
+  float coastal = vCoastal;
+  float nearCoast = vNearCoast;
+  float isOcean = step(biome, 0.5); // biome 0 = ocean -> 1.0, >= 2 = land -> 0.0
+
+  // Wave shimmer — purely a normal perturbation, no geometry moves.
+  // Open ocean: gentle, slow swells. Near/bordering land: a bit choppier.
+  float wave = 0.0;
+  if (isOcean > 0.5) {
+    float p = dot(vWorldPos, vec3(0.21, 0.37, 0.62)) * 0.04;
+    float swell = sin(p + uTime * uWaveSpeed * 0.8) * 0.5 + 0.5;
+    float chop = vnoise(vWorldPos * 0.10 + vec3(0.0, uTime * uWaveSpeed * 0.4, 0.0)) * 2.0 - 1.0;
+
+    // Modulate by land proximity: coastal strongest, then nearCoast, then open ocean faintest.
+    float proximity = mix(0.4, 1.0, mix(coastal, nearCoast, coastal));
+    float baseChop = swell * 0.25 + chop * 0.15;
+    wave = baseChop * proximity * uWaveStrength;
+  }
+
+  // Perturb the normal so lighting / specular glint drifts like ripples.
+  if (wave != 0.0) {
+    vec3 waveDir = normalize(cross(N, vec3(0.0, 1.0, 0.0)));
+    if (dot(waveDir, waveDir) < 0.01) waveDir = normalize(cross(N, vec3(1.0, 0.0, 0.0)));
+    vec3 waveTan = cross(waveDir, N);
+    N = normalize(N + waveDir * wave * 0.8 + waveTan * wave * 0.4);
+  }
+
+  // DEBUG: tint coastal hexes green to verify attribute pipeline
+  // (remove once confirmed working)
+  if (coastal > 0.5) {
+    fragColor = vec4(0.0, 1.0, 0.0, 1.0);
+    return;
+  }
+
+  vec3 base = biomeColor(biome);
+
+  // Soft, mostly-flat lighting so every tile reads as a solid colour.
+  float ndl = max(dot(N, L), 0.0);
+  float light = 0.62 + 0.55 * ndl;
+  vec3 color = base * light;
+
+  // Thin atmospheric rim at the silhouette.
+  float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
+  color += vec3(0.18, 0.38, 0.68) * rim * 0.55;
+
+  // Tile borders. Screen-space width, capped so zoomed-out tiles stay clean.
+  float aa = max(fwidth(vEdge), 1e-5);
+  float bw = min(uBorderWidth, 1.0 * aa);
+  float border = 1.0 - smoothstep(bw - aa, bw + aa, vEdge);
+  color = mix(color, vec3(0.015, 0.025, 0.04), border);
+
+  fragColor = vec4(color, 1.0);
+}
+`;
+
+  const tileMaterial = new ShaderMaterial(
+    'tileMaterial',
+    scene,
+    { vertexSource: tileVertexShader, fragmentSource: tileFragmentShader },
+    {
+      attributes: ['position', 'normal', 'biome', 'edge', 'coastal', 'nearCoast'],
+      uniforms: ['viewProjection', 'cameraPosition', 'uSunDir', 'uBorderWidth', 'uTime', 'uWaveStrength', 'uWaveSpeed'],
+      uniformBuffers: ['SceneUniforms'],
+      needAlphaBlending: false,
+      needAlphaTesting: false,
+    },
+  );
+
+  tileMaterial.setVector3('uSunDir', new Vector3(0.8, 0.45, 0.55).normalize());
+  tileMaterial.setFloat('uBorderWidth', 0.16);
+  tileMaterial.setFloat('uWaveStrength', 2.5);
+  tileMaterial.setFloat('uWaveSpeed', 1.0);
+  tileMaterial.backFaceCulling = false;
+  tileMaterial.forceDepthWrite = true;
+  landMesh.material = tileMaterial;
+
+  // --------------------------------------------------------------------------
+  // Starfield
+  // --------------------------------------------------------------------------
+  const starCount = 2200;
+  const starPositions = new Float32Array(starCount * 3);
+  const starColors = new Float32Array(starCount * 3);
+  for (let i = 0; i < starCount; i++) {
+    const r = radius * 20 + Math.random() * radius * 40;
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(2 * Math.random() - 1);
+    starPositions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+    starPositions[i * 3 + 1] = r * Math.cos(phi);
+    starPositions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+    const tint = 0.75 + Math.random() * 0.25;
+    starColors[i * 3] = tint;
+    starColors[i * 3 + 1] = tint;
+    starColors[i * 3 + 2] = Math.min(1, tint + Math.random() * 0.15);
+  }
+
+  const starsMesh = new Mesh('starsMesh', scene);
+  const starVertexData = new VertexData();
+  starVertexData.positions = starPositions;
+  starVertexData.colors = starColors;
+  starVertexData.applyToMesh(starsMesh, false);
+
+  const starVertexShader = `#version 300 es
+precision highp float;
+in vec3 position;
+in vec3 color;
+out vec3 vColor;
+uniform mat4 viewProjection;
+void main() {
+  vColor = color;
+  gl_Position = viewProjection * vec4(position, 1.0);
+  gl_PointSize = 1.5;
+}
+`;
+
+  const starFragmentShader = `#version 300 es
+precision highp float;
+in vec3 vColor;
+out vec4 fragColor;
+void main() {
+  fragColor = vec4(vColor, 1.0);
+}
+`;
+
+  const starMaterial = new ShaderMaterial(
+    'starMaterial',
+    scene,
+    { vertexSource: starVertexShader, fragmentSource: starFragmentShader },
+    {
+      attributes: ['position', 'color'],
+      uniforms: ['viewProjection'],
+      uniformBuffers: ['SceneUniforms'],
+      needAlphaBlending: true,
+      needAlphaTesting: false,
+    },
+  );
+  starMaterial.forceDepthWrite = false;
+  starMaterial.alphaMode = Constants.ALPHA_ADD;
+  starMaterial.pointsCloud = true;
+  starsMesh.material = starMaterial;
+  starsMesh.alwaysSelectAsActiveMesh = true;
+
+  // --------------------------------------------------------------------------
+  // Lifecycle
+  // --------------------------------------------------------------------------
+  function dispose() {
+    landMesh.dispose();
+    tileMaterial.dispose();
+    starsMesh.dispose();
+    starMaterial.dispose();
+    scene.dispose();
+  }
+
+  function updateUniforms(_cameraPos: Vector3, time: number) {
+    // Scene uniforms (camera position) are updated automatically by Babylon.
+    tileMaterial.setFloat('uTime', time);
+    tileMaterial.setFloat('uWaveStrength', 2.5);
+    tileMaterial.setFloat('uWaveSpeed', 1.0);
+    if (Math.floor(time * 10) % 10 === 0) {
+      console.log('[Ocean] uTime=', time.toFixed(3), 'uWaveStrength=2.5 uWaveSpeed=1.0');
+    }
+  }
+
+  return {
+    scene,
+    landMesh,
+    dispose,
+    updateUniforms,
+  };
+}

@@ -1,0 +1,28 @@
+{
+  "name": "3d-front-server",
+  "version": "1.0.0",
+  "description": "Relay server for 3D-Front multiplayer",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "keywords": ["multiplayer", "websocket", "relay", "rts"],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^5.3.0",
+    "msgpackr": "^2.1.4",
+    "ws": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "tsx": "^4.29.0",
+    "typescript": "^7.0.2"
+  }
+}
