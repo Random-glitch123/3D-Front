@@ -1,0 +1,36 @@
+{
+  // Default building costs and construction times.
+  // Edit these values to tune game balance — no code changes needed.
+  // All costs are in gold. Population cost reduces available population.
+  // timeSeconds is the construction duration (with animation on client).
+
+  "city": {
+    "gold": 120,
+    "population": 10,
+    "timeSeconds": 10,
+    "description": "Increases max population of this hex",
+    "maxLevel": 3
+  },
+  "factory": {
+    "gold": 180,
+    "population": 5,
+    "timeSeconds": 10,
+    "description": "Generates gold income per second",
+    "maxLevel": 3
+  },
+  "base": {
+    "gold": 250,
+    "population": 20,
+    "timeSeconds": 10,
+    "description": "Increases soldier generation rate by 2% (stacks)",
+    "maxLevel": 1
+  },
+  "capital": {
+    "gold": 600,
+    "population": 50,
+    "timeSeconds": 15,
+    "description": "Upgraded city — 1.5x total country population. One per player.",
+    "maxLevel": 1,
+    "onePerPlayer": true
+  }
+}

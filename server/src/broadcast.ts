@@ -2,7 +2,7 @@
 // Handles sending messages to clients in a lobby
 
 import { LobbyManager, ConnectedClient } from './lobby';
-import { ServerMessage, ClientMessage, LobbyState, Player } from './shared/protocol';
+import { ServerMessage, ClientMessage, LobbyState, Player, GameState, WorldMapData } from './shared/protocol';
 
 export class Broadcaster {
   constructor(private lobbyManager: LobbyManager) {}
@@ -159,6 +159,85 @@ export class Broadcaster {
       }))
     };
   }
+
+  // Get all connected clients in a lobby
+  getLobbyClients(lobbyCode: string): ConnectedClient[] {
+    const lobby = this.lobbyManager.getLobby(lobbyCode);
+    if (!lobby) return [];
+    return lobby.players
+      .map((p: Player) => this.lobbyManager.getClient(p.id))
+      .filter((c): c is ConnectedClient => c !== undefined);
+  }
+
+  // Broadcast full game state to all players
+  broadcastGameState(lobby: LobbyState): void {
+    if (!lobby.gameState) return;
+    // Convert Maps to arrays for wire serialization
+    const wireState = {
+      hexOwnership: lobby.gameState.hexOwnership,
+      playerEconomies: Array.from(lobby.gameState.playerEconomies.entries()),
+      territories: Array.from(lobby.gameState.territories.entries()),
+      selectedHexes: Array.from(lobby.gameState.selectedHexes.entries())
+    } as any; // Cast to any to bypass strict Map type checking for wire format
+    this.broadcast(lobby, {
+      type: 'game_state_sync',
+      state: wireState
+    });
+  }
+
+  // Broadcast start hex countdown
+  broadcastStartHexCountdown(lobby: LobbyState, secondsRemaining: number): void {
+    this.broadcast(lobby, {
+      type: 'start_hex_countdown',
+      secondsRemaining
+    });
+  }
+
+  // Broadcast hex selection
+  broadcastHexSelection(lobby: LobbyState, playerId: string, hexId: number, isMultiSelect: boolean): void {
+    this.broadcast(lobby, {
+      type: 'hex_selected',
+      hexId,
+      playerId,
+      isMultiSelect
+    });
+  }
+
+  // Broadcast hex deselection
+  broadcastHexDeselection(lobby: LobbyState, playerId: string, hexId: number): void {
+    this.broadcast(lobby, {
+      type: 'hex_deselected',
+      hexId,
+      playerId
+    });
+  }
+
+  // Broadcast attack result
+  broadcastAttackResult(lobby: LobbyState, result: {
+    attackerId: string;
+    hexId: number;
+    fromHexIds: number[];
+    success: boolean;
+    casualties: number;
+    defenderId?: string;
+  }): void {
+    this.broadcast(lobby, {
+      type: 'attack_result',
+      hexId: result.hexId,
+      attackerId: result.attackerId,
+      defenderId: result.defenderId,
+      success: result.success,
+      casualties: result.casualties
+    });
+  }
+
+  // Broadcast territory update
+  broadcastTerritoryUpdate(lobby: LobbyState, territory: any): void {
+    this.broadcast(lobby, {
+      type: 'territory_updated',
+      territory
+    });
+  }
 }
 
 // Handle incoming client messages
@@ -166,7 +245,9 @@ export function handleClientMessage(
   clientId: string,
   msg: ClientMessage,
   lobbyManager: LobbyManager,
-  broadcaster: Broadcaster
+  broadcaster: Broadcaster,
+  gameStateManager: ReturnType<typeof import('./game/game-state').createGameStateManager>,
+  worldMapData: WorldMapData | null
 ): void {
   const client = lobbyManager.getClient(clientId);
   if (!client) return;
@@ -202,7 +283,8 @@ export function handleClientMessage(
     case 'join_lobby': {
       // Update client's name from the join message before joining
       lobbyManager.setClientName(clientId, msg.name);
-      const lobby = lobbyManager.joinLobby(clientId, msg.code);
+      const colorIndex = (msg as any).colorIndex ?? 0;
+      const lobby = lobbyManager.joinLobby(clientId, msg.code, colorIndex);
       if (lobby) {
         const player = lobby.players.find((p: Player) => p.id === clientId)!;
         broadcaster.notifyLobbyJoined(client, lobby, player);
@@ -270,6 +352,32 @@ export function handleClientMessage(
     case 'ping': {
       // Respond with pong
       broadcaster.send(client, { type: 'pong', time: msg.time });
+      break;
+    }
+
+    case 'select_start_hex': {
+      const lobby = lobbyManager.getClientLobby(clientId);
+      if (!lobby || !lobby.gameState || !worldMapData) {
+        broadcaster.sendError(client, 'Game not started');
+        return;
+      }
+      
+      const result = gameStateManager.selectStartHex(clientId, msg.hexId);
+      
+      if (result.success) {
+        // Send confirmation to player
+        broadcaster.send(client, { type: 'start_hex_confirmed', hexId: msg.hexId });
+        
+        // Broadcast updated game state to all players
+        if (lobby.gameState) {
+          broadcaster.broadcastGameState(lobby);
+        }
+        
+        // Start tick loop if not already running
+        // (This is handled in index.ts)
+      } else {
+        broadcaster.sendError(client, result.error || 'Failed to select starting hex');
+      }
       break;
     }
   }

@@ -1,7 +1,7 @@
 // WebSocket Relay Client for multiplayer
 // Connects to Render server, handles lobby codes, reconnection
 
-import type { ClientMessage, ServerMessage, LobbyState, Player, LobbySettings } from '../shared/protocol';
+import type { ClientMessage, ServerMessage, LobbyState, Player, LobbySettings, PlayerEconomy, GameState, Territory, BuildingType } from '../shared/protocol';
 import { generatePlayerId } from '../shared/protocol';
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'error';
@@ -22,6 +22,21 @@ export interface RelayClientEvents {
   onChat: (playerId: string, playerName: string, message: string) => void;
   onError: (message: string) => void;
   onKicked: (reason: string) => void;
+  // Game state events
+  onGameStateSync: (state: GameState) => void;
+  onEconomyUpdate: (economy: PlayerEconomy) => void;
+  onHexCaptured: (data: { hexId: number; newOwner: string; soldiers: number }) => void;
+  onStartHexConfirmed: (data: { hexId: number }) => void;
+  onStartHexCountdown: (data: { secondsRemaining: number }) => void;
+  onHexSelected: (data: { hexId: number; playerId: string; isMultiSelect: boolean }) => void;
+  onHexDeselected: (data: { hexId: number; playerId: string }) => void;
+  onAttackResult: (data: { success: boolean; hexId: number; attackerId: string; defenderId?: string; casualties: number }) => void;
+  onTerritoryUpdated: (data: { territory: Territory }) => void;
+  onPathfindingResult: (data: { path: number[]; accessible: boolean }) => void;
+  onBuildingStarted: (data: { hexId: number; buildingType: BuildingType; playerId: string }) => void;
+  onBuildingCompleted: (data: { hexId: number; buildingType: BuildingType; playerId: string }) => void;
+  onBuildingDemolished: (data: { hexId: number; playerId: string }) => void;
+  onCapitalDestroyed: (data: { hexId: number; formerOwnerId: string; capturedBy: string | null }) => void;
 }
 
 export class RelayClient {
@@ -198,20 +213,68 @@ export class RelayClient {
       case 'pong':
         // Handle ping/pong for latency measurement
         break;
+      case 'game_state_sync':
+        this.emit('onGameStateSync', msg.state);
+        break;
+      case 'economy_update':
+        this.emit('onEconomyUpdate', msg.economy);
+        break;
+      case 'hex_captured':
+        this.emit('onHexCaptured', { hexId: msg.hexId, newOwner: msg.newOwner, soldiers: msg.soldiers });
+        break;
+      case 'start_hex_confirmed':
+        this.emit('onStartHexConfirmed', { hexId: msg.hexId });
+        break;
+      case 'start_hex_countdown':
+        this.emit('onStartHexCountdown', { secondsRemaining: msg.secondsRemaining });
+        break;
+      case 'hex_selected':
+        this.emit('onHexSelected', { hexId: msg.hexId, playerId: msg.playerId, isMultiSelect: msg.isMultiSelect });
+        break;
+      case 'hex_deselected':
+        this.emit('onHexDeselected', { hexId: msg.hexId, playerId: msg.playerId });
+        break;
+      case 'attack_result':
+        this.emit('onAttackResult', {
+          success: msg.success,
+          hexId: msg.hexId,
+          attackerId: msg.attackerId,
+          defenderId: msg.defenderId,
+          casualties: msg.casualties,
+        });
+        break;
+      case 'territory_updated':
+        this.emit('onTerritoryUpdated', { territory: msg.territory });
+        break;
+      case 'building_started':
+        this.emit('onBuildingStarted', { hexId: msg.hexId, buildingType: msg.buildingType, playerId: msg.playerId });
+        break;
+      case 'building_completed':
+        this.emit('onBuildingCompleted', { hexId: msg.hexId, buildingType: msg.buildingType, playerId: msg.playerId });
+        break;
+      case 'building_demolished':
+        this.emit('onBuildingDemolished', { hexId: msg.hexId, playerId: msg.playerId });
+        break;
+      case 'capital_destroyed':
+        this.emit('onCapitalDestroyed', { hexId: msg.hexId, formerOwnerId: msg.formerOwnerId, capturedBy: msg.capturedBy });
+        break;
+      case 'pathfinding_result':
+        this.emit('onPathfindingResult', { path: msg.path, accessible: msg.accessible });
+        break;
     }
   }
 
   // Convenience methods
-  createLobby(settings: any): void {
-    this.send({ type: 'create_lobby', settings, name: this.playerName });
+  createLobby(settings: any, colorIndex: number = 0): void {
+    this.send({ type: 'create_lobby', settings, name: this.playerName, colorIndex });
   }
 
   updateLobby(settings: Partial<LobbySettings>): void {
     this.send({ type: 'update_lobby', settings });
   }
 
-  joinLobby(code: string): void {
-    this.send({ type: 'join_lobby', code, name: this.playerName });
+  joinLobby(code: string, colorIndex: number = 0): void {
+    this.send({ type: 'join_lobby', code, name: this.playerName, colorIndex });
   }
 
   leaveLobby(): void {

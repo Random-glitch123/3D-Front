@@ -48,6 +48,7 @@ export interface GlobeRenderer {
   landMesh: Mesh;
   dispose(): void;
   updateUniforms(cameraPos: Vector3, time: number): void;
+  updateOwnership(ownershipColors: Float32Array, hexes: WorldMapData['hexes']): void;
 }
 
 function buildBiomeColorFunction(
@@ -131,6 +132,7 @@ export async function createGlobeRenderer(
   const edgeAttr = new Float32Array(vertexCount);
   const coastalAttr = new Float32Array(vertexCount);
   const nearCoastAttr = new Float32Array(vertexCount);
+  const ownershipAttr = new Float32Array(vertexCount * 3); // RGB per vertex
   const indices = new Uint32Array(indexCount);
 
   let v = 0;
@@ -340,6 +342,8 @@ export async function createGlobeRenderer(
   landMesh.setVerticesData('edge', edgeAttr, false, 1);
   landMesh.setVerticesData('coastal', coastalAttr, false, 1);
   landMesh.setVerticesData('nearCoast', nearCoastAttr, false, 1);
+  landMesh.setVerticesData('ownership', ownershipAttr, false, 3); // vec3
+  landMesh.setVerticesData('territoryBorder', new Float32Array(vertexCount), false, 1);
   landMesh.alwaysSelectAsActiveMesh = true;
 
   // --------------------------------------------------------------------------
@@ -356,6 +360,8 @@ in float biome;
 in float edge;
 in float coastal;
 in float nearCoast;
+in vec3 ownership; // RGB color of owner, 0,0,0 = unowned
+in float territoryBorder; // 1 = owned hex on a territory edge
 
 uniform mat4 viewProjection;
 uniform vec3 cameraPosition;
@@ -367,6 +373,8 @@ out float vBiome;
 out float vEdge;
 out float vCoastal;
 out float vNearCoast;
+out vec3 vOwnership;
+out float vTerritoryBorder;
 
 void main() {
   vWorldPos = position;
@@ -376,6 +384,8 @@ void main() {
   vEdge = edge;
   vCoastal = coastal;
   vNearCoast = nearCoast;
+  vOwnership = ownership;
+  vTerritoryBorder = territoryBorder;
   gl_Position = viewProjection * vec4(position, 1.0);
 }
 `;
@@ -396,10 +406,15 @@ in float vBiome;
 in float vEdge;
 in float vCoastal;
 in float vNearCoast;
+in vec3 vOwnership; // RGB color of owner, 0,0,0 = unowned
+in float vTerritoryBorder;
 
 out vec4 fragColor;
 
 ${biomeColorFn}
+
+// Ownership tint opacity (25%)
+#define OWNERSHIP_TINT_OPACITY 0.45
 
 #define TAU 6.28318530718
 
@@ -484,6 +499,7 @@ void main() {
   float coastal = vCoastal;
   float nearCoast = vNearCoast;
   float isOcean = step(biome, 0.5); // biome 0 = ocean -> 1.0, >= 2 = land -> 0.0
+  float isLand = 1.0 - isOcean;
 
   vec3 base = biomeColor(biome);
 
@@ -491,6 +507,11 @@ void main() {
   float ndl = max(dot(N, L), 0.0);
   float light = 0.62 + 0.55 * ndl;
   vec3 color = base * light;
+
+  // Ownership tint (25% opacity) - only for land tiles
+  if (isLand > 0.5 && length(vOwnership) > 0.0) {
+    color = mix(color, vOwnership, OWNERSHIP_TINT_OPACITY);
+  }
 
   // Thin atmospheric rim at the silhouette.
   float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);
@@ -547,8 +568,10 @@ void main() {
   }
 
   // Tile borders. Screen-space width, capped so zoomed-out tiles stay clean.
+  // Owned hexes on a territory edge get a thicker black outline.
   float aa = max(fwidth(vEdge), 1e-5);
-  float bw = min(uBorderWidth, 1.0 * aa);
+  float widthScale = mix(1.0, 2.6, vTerritoryBorder);
+  float bw = min(uBorderWidth * widthScale, widthScale * aa);
   float border = 1.0 - smoothstep(bw - aa, bw + aa, vEdge);
   color = mix(color, vec3(0.015, 0.025, 0.04), border);
 
@@ -561,7 +584,7 @@ void main() {
     scene,
     { vertexSource: tileVertexShader, fragmentSource: tileFragmentShader },
     {
-      attributes: ['position', 'normal', 'biome', 'edge', 'coastal', 'nearCoast'],
+      attributes: ['position', 'normal', 'biome', 'edge', 'coastal', 'nearCoast', 'ownership', 'territoryBorder'],
       uniforms: ['viewProjection', 'cameraPosition', 'uSunDir', 'uBorderWidth', 'uTime', 'uWaveStrength', 'uWaveSpeed'],
       uniformBuffers: ['SceneUniforms'],
       needAlphaBlending: false,
@@ -658,10 +681,61 @@ void main() {
     tileMaterial.setFloat('uTime', time);
   }
 
+  function updateOwnership(ownershipColors: Float32Array, hexes: WorldMapData['hexes']) {
+    // ownershipColors: Float32Array of length hexCount * 3 (RGB per hex, 0,0,0 = unowned)
+    // hexes: array of hex data with corners array for each hex
+    // We need to expand per-hex colors to per-vertex colors.
+
+    const vertexCount = landMesh.getTotalVertices();
+    const ownershipBuffer = new Float32Array(vertexCount * 3);
+    const territoryBuffer = new Float32Array(vertexCount);
+
+    let v = 0;
+    for (let hi = 0; hi < hexes.length; hi++) {
+      const hex = hexes[hi];
+      const count = hex.corners.length;
+      const vertsPerHex = 6 * count + 2; // top center + top corners + bottom center + bottom corners + side walls
+
+      // Get hex color (3 floats)
+      const r = ownershipColors[hi * 3];
+      const g = ownershipColors[hi * 3 + 1];
+      const b = ownershipColors[hi * 3 + 2];
+
+      // A territory edge = owned hex touching a hex with a different owner
+      // (including unowned land). Draw those outlines thicker in the shader.
+      let isTerritoryBorder = 0;
+      if (r + g + b > 0) {
+        for (const neighborId of hex.neighbors) {
+          if (neighborId < 0 || neighborId >= hexes.length) continue;
+          const nr = ownershipColors[neighborId * 3];
+          const ng = ownershipColors[neighborId * 3 + 1];
+          const nb = ownershipColors[neighborId * 3 + 2];
+          if (Math.abs(r - nr) + Math.abs(g - ng) + Math.abs(b - nb) > 0.02) {
+            isTerritoryBorder = 1;
+            break;
+          }
+        }
+      }
+
+      // Fill ownership + border flag for all vertices of this hex
+      for (let i = 0; i < vertsPerHex; i++) {
+        ownershipBuffer[v * 3] = r;
+        ownershipBuffer[v * 3 + 1] = g;
+        ownershipBuffer[v * 3 + 2] = b;
+        territoryBuffer[v] = isTerritoryBorder;
+        v++;
+      }
+    }
+
+    landMesh.setVerticesData('ownership', ownershipBuffer, false, 3);
+    landMesh.setVerticesData('territoryBorder', territoryBuffer, false, 1);
+  }
+
   return {
     scene,
     landMesh,
     dispose,
     updateUniforms,
+    updateOwnership,
   };
 }

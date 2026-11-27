@@ -2,13 +2,14 @@
 // Handles: Singleplayer, Multiplayer (Host/Join), Settings
 
 import type { Player } from '../shared/protocol';
+import { PLAYER_COLORS } from '../shared/protocol';
 
 export interface MenuCallbacks {
   onSingleplayer: () => void;
-  onHostGame: (settings: LobbySettings) => void;
+  onHostGame: (settings: LobbySettings, colorIndex: number) => void;
   onHostPanelShow: () => void;
   onHostSettingsChange: (settings: Partial<LobbySettings>) => void;
-  onJoinGame: (code: string) => void;
+  onJoinGame: (code: string, colorIndex: number) => void;
   onPlayerNameChange: (name: string) => void;
   onServerUrlChange: (url: string) => void;
   onSettings: () => void;
@@ -22,7 +23,7 @@ export interface LobbySettings {
 
 function getDefaultServerUrl(): string {
   if (import.meta.env.PROD) {
-    return 'https://3d-front-server.onrender.com';
+    return 'https://threed-front-server.onrender.com';
   }
   return 'ws://localhost:3000';
 }
@@ -272,9 +273,10 @@ export function createMenu(callbacks: MenuCallbacks): HTMLElement {
       public: hostPublicEl.checked,
       map: hostMapEl.value
     };
+    const colorIndex = (hostPanel as any).selectedColorIndex ?? 0;
     hostStatusEl.textContent = 'Starting game...';
     hostStatusEl.className = 'status-text status-connecting';
-    callbacks.onHostGame(settings);
+    callbacks.onHostGame(settings, colorIndex);
   });
   hostPanel.querySelector('#btn-back-from-host')!.addEventListener('click', () => showPanel(mainPanel));
 
@@ -317,9 +319,10 @@ export function createMenu(callbacks: MenuCallbacks): HTMLElement {
       joinStatusEl.className = 'status-text status-error';
       return;
     }
+    const colorIndex = (joinPanel as any).selectedColorIndex ?? 0;
     joinStatusEl.textContent = 'Joining...';
     joinStatusEl.className = 'status-text status-connecting';
-    callbacks.onJoinGame(code);
+    callbacks.onJoinGame(code, colorIndex);
   });
   joinPanel.querySelector('#btn-back-from-join')!.addEventListener('click', () => showPanel(mainPanel));
 
@@ -388,6 +391,13 @@ function createMainPanel(): HTMLElement {
 function createHostPanel(): HTMLElement {
   const panel = createPanel('host');
   panel.classList.add('hidden');
+  
+  // Build color picker HTML
+  const colorPickerHtml = PLAYER_COLORS.map((color, index) => {
+    const hex = '#' + color.toString(16).padStart(6, '0');
+    return `<button type="button" class="color-swatch${index === 0 ? ' selected' : ''}" data-index="${index}" style="background: ${hex};" title="Color ${index + 1}"></button>`;
+  }).join('');
+
   panel.innerHTML = `
     <h2 style="margin: 0 0 1.5rem; font-size: 1.5rem;">Host Game</h2>
     <div class="setting-row">
@@ -420,6 +430,10 @@ function createHostPanel(): HTMLElement {
         <option value="custom">Custom</option>
       </select>
     </div>
+    <div class="setting-row">
+      <span class="setting-label">Your Color</span>
+      <div class="color-picker-grid" id="host-color-picker">${colorPickerHtml}</div>
+    </div>
     <div style="margin: 1rem 0;">
       <div style="font-size: 0.9rem; color: #888; margin-bottom: 0.5rem;">Players in Lobby</div>
       <div id="host-player-list" style="min-height: 60px; background: rgba(0,0,0,0.3); border: 1px solid #334; border-radius: 8px; padding: 0.75rem; font-family: monospace; font-size: 0.9rem;">
@@ -432,15 +446,70 @@ function createHostPanel(): HTMLElement {
       <button id="btn-back-from-host" class="menu-btn menu-btn-secondary" style="flex: 1;">Back</button>
     </div>
   `;
+
+  // Add color picker styles
+  const style = document.createElement('style');
+  style.textContent = `
+    .color-picker-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    .color-swatch {
+      aspect-ratio: 1;
+      border-radius: 8px;
+      border: 2px solid transparent;
+      cursor: pointer;
+      transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .color-swatch:hover {
+      transform: scale(1.1);
+      border-color: rgba(255, 255, 255, 0.5);
+    }
+    .color-swatch.selected {
+      border-color: #00ffff;
+      box-shadow: 0 0 12px rgba(0, 255, 255, 0.6);
+    }
+  `;
+  document.head.appendChild(style);
+
+  // Color picker event listeners
+  const colorPicker = panel.querySelector('#host-color-picker')!;
+  colorPicker.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    if (target.classList.contains('color-swatch')) {
+      const index = parseInt(target.dataset.index || '0', 10);
+      colorPicker.querySelectorAll('.color-swatch').forEach(el => el.classList.remove('selected'));
+      target.classList.add('selected');
+      // Store selected color index
+      (panel as any).selectedColorIndex = index;
+    }
+  });
+
+  // Default selected color index
+  (panel as any).selectedColorIndex = 0;
+
   return panel;
 }
 
 function createJoinPanel(): HTMLElement {
   const panel = createPanel('join');
   panel.classList.add('hidden');
+  
+  // Build color picker HTML
+  const colorPickerHtml = PLAYER_COLORS.map((color, index) => {
+    const hex = '#' + color.toString(16).padStart(6, '0');
+    return `<button type="button" class="color-swatch${index === 0 ? ' selected' : ''}" data-index="${index}" style="background: ${hex};" title="Color ${index + 1}"></button>`;
+  }).join('');
+
   panel.innerHTML = `
     <h2 style="margin: 0 0 1.5rem; font-size: 1.5rem;">Join Game</h2>
     <input id="join-code" class="input-field" placeholder="A5J2" maxlength="4" style="font-size: 2rem; letter-spacing: 0.8em;">
+    <div class="setting-row">
+      <span class="setting-label">Your Color</span>
+      <div class="color-picker-grid" id="join-color-picker">${colorPickerHtml}</div>
+    </div>
     <div style="margin: 1rem 0;">
       <div style="font-size: 0.9rem; color: #888; margin-bottom: 0.5rem;">Players in Lobby</div>
       <div id="join-player-list" style="min-height: 60px; background: rgba(0,0,0,0.3); border: 1px solid #334; border-radius: 8px; padding: 0.75rem; font-family: monospace; font-size: 0.9rem;">
@@ -453,6 +522,21 @@ function createJoinPanel(): HTMLElement {
       <button id="btn-back-from-join" class="menu-btn menu-btn-secondary" style="flex: 1;">Back</button>
     </div>
   `;
+
+  // Color picker event listeners
+  const colorPicker = panel.querySelector('#join-color-picker')!;
+  colorPicker.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement;
+    if (target.classList.contains('color-swatch')) {
+      const index = parseInt(target.dataset.index || '0', 10);
+      colorPicker.querySelectorAll('.color-swatch').forEach(el => el.classList.remove('selected'));
+      target.classList.add('selected');
+      (panel as any).selectedColorIndex = index;
+    }
+  });
+
+  (panel as any).selectedColorIndex = 0;
+
   return panel;
 }
 

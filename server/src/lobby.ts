@@ -1,7 +1,7 @@
 // Lobby Manager for the relay server
 // Handles 4-letter codes, player management, host election
 
-import { LobbyState, LobbySettings, Player, generateLobbyCode, generatePlayerId } from './shared/protocol';
+import { LobbyState, LobbySettings, Player, generateLobbyCode, generatePlayerId, PLAYER_COLORS } from './shared/protocol';
 
 export interface ConnectedClient {
   id: string;
@@ -30,7 +30,7 @@ export class LobbyManager {
   }
 
   // Create a new lobby
-  createLobby(clientId: string, settings: LobbySettings): LobbyState {
+  createLobby(clientId: string, settings: LobbySettings, colorIndex: number = 0): LobbyState {
     let code: string;
     let attempts = 0;
     do {
@@ -45,11 +45,15 @@ export class LobbyManager {
     const client = this.clients.get(clientId);
     if (!client) throw new Error('Client not found');
 
+    // Clamp color index to valid range
+    const safeColorIndex = Math.max(0, Math.min(colorIndex, PLAYER_COLORS.length - 1));
+    
     const player: Player = {
       id: clientId,
       name: client.name,
       ready: true, // Host is auto-ready
-      color: this.generateColor(0),
+      color: PLAYER_COLORS[safeColorIndex] ?? 0x00ffff,
+      colorIndex: safeColorIndex,
       isHost: true
     };
 
@@ -86,7 +90,7 @@ export class LobbyManager {
   }
 
   // Join existing lobby
-  joinLobby(clientId: string, code: string): LobbyState | null {
+  joinLobby(clientId: string, code: string, colorIndex: number = 0): LobbyState | null {
     const lobby = this.lobbies.get(code.toUpperCase());
     if (!lobby) return null;
     if (lobby.state !== 'lobby') return null;
@@ -98,12 +102,19 @@ export class LobbyManager {
     // Check if already in lobby
     if (lobby.players.some((p: Player) => p.id === clientId)) return lobby;
 
-    const colorIndex = lobby.players.length;
+    // Check if color is already taken
+    const takenColors = new Set(lobby.players.map(p => p.colorIndex));
+    let safeColorIndex = Math.max(0, Math.min(colorIndex, PLAYER_COLORS.length - 1));
+    while (takenColors.has(safeColorIndex)) {
+      safeColorIndex = (safeColorIndex + 1) % PLAYER_COLORS.length;
+    }
+    
     const player: Player = {
       id: clientId,
       name: client.name,
       ready: false,
-      color: this.generateColor(colorIndex),
+      color: PLAYER_COLORS[safeColorIndex] ?? 0x00ffff,
+      colorIndex: safeColorIndex,
       isHost: false
     };
 
@@ -231,25 +242,7 @@ export class LobbyManager {
     return lobby?.hostId === clientId;
   }
 
-  // Generate distinct colors for players
-  private generateColor(index: number): number {
-    const hues = [
-      0, 30, 60, 120, 180, 210, 240, 270, 300, 330, 15, 45 // 12 distinct hues
-    ];
-    const hue = hues[index % hues.length] ?? 0;
-    return this.hslToHex(hue, 70, 55);
-  }
-
-  private hslToHex(h: number, s: number, l: number): number {
-    s /= 100; l /= 100;
-    const k = (n: number) => (n + h / 30) % 12;
-    const a = s * Math.min(l, 1 - l);
-    const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
-    const r = Math.round(f(0) * 255);
-    const g = Math.round(f(8) * 255);
-    const b = Math.round(f(4) * 255);
-    return (r << 16) | (g << 8) | b;
-  }
+  
 
   // Cleanup empty/old lobbies
   private cleanup(): void {
