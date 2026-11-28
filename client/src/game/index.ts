@@ -298,14 +298,14 @@ export class GameModule {
       const building = manager.getHexBuilding(hexId);
       const isOwned = owner === this.config.localPlayerId;
 
-      // Determine if frontline (borders enemy)
-      let isFrontline = false;
+      // Determine if target borders any friendly (owned by us) hex - needed for attack sources
+      let bordersFriendly = false;
       if (worldHex) {
         for (const nbId of worldHex.neighbors) {
           const nb = manager.getHexOwnership(nbId);
-          if (nb && nb.ownerId && nb.ownerId !== this.config.localPlayerId) {
-            isFrontline = true;
-            break;
+          if (!nb) continue;
+          if (nb.ownerId === this.config.localPlayerId) {
+            bordersFriendly = true;
           }
         }
       }
@@ -314,7 +314,7 @@ export class GameModule {
         hexId,
         owner,
         isOwned,
-        isFrontline,
+        isFrontline: bordersFriendly, // Can attack from adjacent friendly hex
         selectedHexIds: [...this.selectedHexIds],
         biome: worldHex?.biome ?? 0,
         soldiers: hexOwnership?.soldiers ?? 0,

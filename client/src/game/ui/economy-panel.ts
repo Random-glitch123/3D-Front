@@ -1,5 +1,6 @@
-// Bottom Economy Panel - Unified panel with soldier count, gold, population, and attack allocation
-// All info at the bottom with 2 bars stacked on top of each other
+// Bottom Economy Panel - Compact unified panel at bottom
+// Everything at bottom: soldiers/gold stats + 2 stacked bars (population→soldiers, attack commitment)
+// Small, compact UI that doesn't require zooming out
 
 import type { PlayerEconomy } from '../../shared/protocol';
 
@@ -17,6 +18,7 @@ export class EconomyPanel {
   private panel: HTMLElement;
   private soldierCountEl: HTMLElement;
   private goldEl: HTMLElement;
+  private incomeEl: HTMLElement;
   private populationBarFill: HTMLElement;
   private populationLabel: HTMLElement;
   private attackBarFill: HTMLElement;
@@ -37,6 +39,7 @@ export class EconomyPanel {
 
     this.soldierCountEl = this.panel.querySelector('#soldier-count')!;
     this.goldEl = this.panel.querySelector('#economy-gold')!;
+    this.incomeEl = this.panel.querySelector('#economy-income')!;
     this.populationBarFill = this.panel.querySelector('#population-bar-fill')!;
     this.populationLabel = this.panel.querySelector('#population-label')!;
     this.attackBarFill = this.panel.querySelector('#attack-bar-fill')!;
@@ -56,142 +59,149 @@ export class EconomyPanel {
       bottom: 0;
       left: 0;
       right: 0;
-      height: 140px;
+      height: 86px;
       z-index: 200;
       pointer-events: auto;
-      background: linear-gradient(180deg, rgba(8, 8, 18, 0.95), rgba(16, 16, 38, 0.9));
-      border-top: 2px solid rgba(0, 255, 255, 0.3);
-      backdrop-filter: blur(20px);
+      background: linear-gradient(180deg, rgba(6, 6, 14, 0.96), rgba(12, 12, 28, 0.92));
+      border-top: 1.5px solid rgba(0, 255, 255, 0.35);
+      backdrop-filter: blur(12px);
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 0.75rem;
-      padding: 0.75rem 2rem;
+      gap: 0.35rem;
+      padding: 0.4rem 1.5rem;
       font-family: 'Segoe UI', system-ui, sans-serif;
+      box-sizing: border-box;
     `;
 
     panel.innerHTML = `
       <style>
-        #economy-panel .top-row {
+        #economy-panel * { box-sizing: border-box; }
+        #economy-panel .top-stats {
           display: flex;
           align-items: center;
-          gap: 2rem;
+          gap: 1.2rem;
           width: 100%;
-          max-width: 900px;
+          max-width: 1000px;
           justify-content: space-between;
         }
-        #economy-panel .stat-group {
+        #economy-panel .stat {
           display: flex;
           align-items: center;
-          gap: 0.75rem;
-          color: rgba(220, 245, 255, 0.95);
+          gap: 0.5rem;
+          color: rgba(220, 245, 255, 0.9);
         }
         #economy-panel .stat-label {
-          font-size: 0.7rem;
+          font-size: 0.62rem;
           text-transform: uppercase;
-          letter-spacing: 0.15em;
-          color: rgba(0, 255, 255, 0.7);
+          letter-spacing: 0.08em;
+          color: rgba(0, 255, 255, 0.55);
           font-weight: 700;
-          white-space: nowrap;
         }
         #economy-panel .stat-value {
           font-family: 'JetBrains Mono', 'Fira Code', monospace;
-          font-size: 1.3rem;
+          font-size: 1.1rem;
           font-weight: 800;
           color: #e0e8ff;
         }
-        #economy-panel .stat-value.gold { color: #fbbf24; text-shadow: 0 0 12px rgba(251, 191, 36, 0.6); }
-        #economy-panel .stat-value.soldiers { color: #00ffff; text-shadow: 0 0 12px rgba(0, 255, 255, 0.6); }
+        #economy-panel .stat-value.gold { color: #fbbf24; text-shadow: 0 0 8px rgba(251, 191, 36, 0.5); }
+        #economy-panel .stat-value.soldiers { color: #00ffff; text-shadow: 0 0 8px rgba(0, 255, 255, 0.5); }
+        #economy-panel .stat-value.income { color: #4ade80; text-shadow: 0 0 8px rgba(74, 222, 128, 0.5); font-size: 0.95rem; }
         #economy-panel .sep {
-          color: rgba(0, 255, 255, 0.25);
-          font-size: 1.1rem;
+          color: rgba(0, 255, 255, 0.18);
+          font-size: 0.9rem;
         }
         #economy-panel .bar-section {
           width: 100%;
           max-width: 700px;
           display: flex;
           flex-direction: column;
-          gap: 0.5rem;
+          gap: 0.35rem;
         }
         #economy-panel .bar-row {
           display: flex;
           align-items: center;
-          gap: 0.75rem;
+          gap: 0.6rem;
           width: 100%;
         }
         #economy-panel .bar-label {
-          width: 110px;
-          font-size: 0.75rem;
+          width: 100px;
+          font-size: 0.65rem;
           text-transform: uppercase;
-          letter-spacing: 0.1em;
-          color: rgba(0, 255, 255, 0.6);
-          font-weight: 600;
-          text-align: left;
+          letter-spacing: 0.06em;
+          color: rgba(0, 255, 255, 0.5);
+          font-weight: 700;
         }
         #economy-panel .bar-track {
           flex: 1;
-          height: 10px;
-          background: rgba(0, 255, 255, 0.1);
-          border-radius: 5px;
+          height: 7px;
+          background: rgba(0, 255, 255, 0.08);
+          border-radius: 3px;
           overflow: hidden;
           position: relative;
         }
         #economy-panel .bar-fill {
           height: 100%;
-          border-radius: 5px;
-          transition: width 0.3s ease;
+          border-radius: 3px;
+          transition: width 0.2s ease;
         }
-        #economy-panel #population-bar-fill { background: linear-gradient(90deg, #4ade80, #22c55e); box-shadow: 0 0 10px rgba(74, 222, 128, 0.5); }
-        #economy-panel #attack-bar-fill { background: linear-gradient(90deg, #3b82f6, #2563eb); box-shadow: 0 0 10px rgba(59, 130, 246, 0.5); }
+        #economy-panel #population-bar-fill { background: linear-gradient(90deg, #4ade80, #22c55e); box-shadow: 0 0 6px rgba(74, 222, 128, 0.4); }
+        #economy-panel #attack-bar-fill { background: linear-gradient(90deg, #3b82f6, #2563eb); box-shadow: 0 0 6px rgba(59, 130, 246, 0.4); }
         #economy-panel .bar-value {
-          width: 40px;
+          width: 34px;
           font-family: 'JetBrains Mono', 'Fira Code', monospace;
-          font-size: 0.85rem;
-          font-weight: 700;
+          font-size: 0.75rem;
+          font-weight: 800;
           color: #e0e8ff;
           text-align: right;
         }
         #economy-panel .slider-group {
           width: 100%;
-          max-width: 500px;
+          max-width: 420px;
           display: flex;
           align-items: center;
-          gap: 0.5rem;
+          gap: 0.4rem;
         }
         #economy-panel input[type=range] {
           flex: 1;
           accent-color: #00ffff;
-          height: 6px;
+          height: 5px;
+          background: transparent;
         }
         #economy-panel .slider-text {
           font-family: 'JetBrains Mono', 'Fira Code', monospace;
-          font-size: 0.8rem;
-          min-width: 40px;
+          font-size: 0.7rem;
+          min-width: 32px;
           text-align: right;
           color: #00ffff;
         }
       </style>
-      <div class="top-row">
-        <div class="stat-group">
+      <div class="top-stats">
+        <div class="stat">
           <span class="stat-label">Soldiers</span>
           <span class="stat-value soldiers" id="soldier-count">0</span>
         </div>
         <span class="sep">|</span>
-        <div class="stat-group">
+        <div class="stat">
           <span class="stat-label">Gold</span>
           <span class="stat-value gold" id="economy-gold">0</span>
+        </div>
+        <span class="sep">|</span>
+        <div class="stat">
+          <span class="stat-label">Income</span>
+          <span class="stat-value income" id="economy-income">+0/sec</span>
         </div>
       </div>
       <div class="bar-section">
         <div class="bar-row">
-          <span class="bar-label">Population → Soldiers</span>
+          <span class="bar-label">Pop → Soldiers</span>
           <div class="bar-track">
             <div class="bar-fill" id="population-bar-fill" style="width: 20%"></div>
           </div>
           <span class="bar-value" id="population-label">20%</span>
         </div>
         <div class="bar-row">
-          <span class="bar-label">Attack Commitment</span>
+          <span class="bar-label">Attack Commit</span>
           <div class="bar-track">
             <div class="bar-fill" id="attack-bar-fill" style="width: 50%"></div>
           </div>
@@ -240,8 +250,8 @@ export class EconomyPanel {
     if (!economy) return;
     this.soldierCountEl.textContent = Math.floor(economy.totalSoldiers).toLocaleString();
     this.goldEl.textContent = economy.gold.toLocaleString();
+    this.incomeEl.textContent = `+${economy.incomePerSecond.toFixed(0)}/sec`;
 
-    // Update sliders if they differ from economy state
     if (Math.abs(this.soldierAllocation - economy.soldierAllocationRatio) > 0.001) {
       this.soldierAllocation = economy.soldierAllocationRatio;
       const pct = Math.round(this.soldierAllocation * 100);
